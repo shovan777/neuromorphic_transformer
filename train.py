@@ -14,7 +14,8 @@ def train(model, device, train_loader, optimizer, epoch, writer, num_classes, lo
     train_acc = 0.0
     data_count = 0
 
-    for batch_idx, (data, target) in enumerate(train_loader):
+    pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]", leave=False)
+    for batch_idx, (data, target) in enumerate(pbar):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
         functional.reset_net(model)
@@ -30,6 +31,8 @@ def train(model, device, train_loader, optimizer, epoch, writer, num_classes, lo
         train_acc += (output.argmax(dim=1) == target).sum().item()
         data_count += target.numel()
         
+        pbar.set_postfix({"loss": f"{loss.item():.4f}", "acc": f"{train_acc / data_count:.4f}"})
+        
     avg_loss = total_loss / len(train_loader.dataset)
     writer.add_scalar("Loss/train", avg_loss, epoch)
     writer.add_scalar("Accuracy/train", train_acc / data_count, epoch)
@@ -39,15 +42,21 @@ def test(model, device, test_loader, epoch, writer, num_classes, loss_fn=F.mse_l
     model.eval()
     test_loss = 0.0
     correct = 0
+    data_count = 0
     with torch.no_grad():
-        for data, target in test_loader:
+        pbar = tqdm(test_loader, desc=f"Epoch {epoch} [Test]", leave=False)
+        for data, target in pbar:
             data, target = data.to(device), target.to(device)
             functional.reset_net(model)
 
             output = model(data)
-            test_loss += loss_fn(output, F.one_hot(target, num_classes=num_classes).float()).item() * target.numel()
+            loss_val = loss_fn(output, F.one_hot(target, num_classes=num_classes).float()).item()
+            test_loss += loss_val * target.numel()
             pred = output.argmax(dim=1, keepdim=True)
             correct += pred.eq(target.view_as(pred)).sum().item()
+            data_count += target.numel()
+            
+            pbar.set_postfix({"loss": f"{loss_val:.4f}", "acc": f"{correct / data_count:.4f}"})
 
     test_loss /= len(test_loader.dataset)
     writer.add_scalar("Loss/test", test_loss, epoch)
@@ -59,8 +68,16 @@ def test(model, device, test_loader, epoch, writer, num_classes, loss_fn=F.mse_l
 def main():
     set_seed(SEED)
     
-    print(f"Using device: {DEVICE}")
-    print(f"Batch size: {BATCH_SIZE}, Learning rate: {LEARNING_RATE}, Number of epochs: {NUM_EPOCHS}")
+    print("="*40)
+    print("      TRAINING CONFIGURATION")
+    print("="*40)
+    print(f"Device:                {DEVICE}")
+    print(f"Seed:                  {SEED}")
+    print(f"Number of Epochs:      {NUM_EPOCHS}")
+    print(f"Batch Size:            {BATCH_SIZE}")
+    print(f"Learning Rate:         {LEARNING_RATE}")
+    print(f"Number of Channels:    {NUM_CHANNELS}")
+    print("="*40)
 
     train_loader, test_loader, num_classes, class_names = get_dataloaders()
     print(f"Number of classes: {num_classes}")

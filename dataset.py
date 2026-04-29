@@ -2,7 +2,7 @@ import os
 import torch
 import torchvision
 from torch.utils.data import DataLoader
-from config import DATA_DIR, BATCH_SIZE, NUM_WORKERS
+from config import DATA_DIR, BATCH_SIZE, NUM_WORKERS, IMG_SIZE, USE_POISSON_ENCODING
 from torchvision import transforms, datasets
 
 def get_dataloaders():
@@ -32,9 +32,11 @@ def get_dataloader_cifar(
     batch_size=128,
     img_size=32,
     validation_split=None,
+    use_basic_augment=True,
     use_random_augment=True,
     random_erasing_prob=0.25,
     num_workers=None,
+    normalize=True,
 ):
     # transform = create_transform(
     #     input_size=img_size,
@@ -47,40 +49,36 @@ def get_dataloader_cifar(
     #     re_count=1,
     # )
 
-    train_ops = [
-        transforms.Resize((img_size, img_size)),
-        transforms.RandomCrop(img_size, padding=4),
-        transforms.RandomHorizontalFlip(),
-    ]
+    train_ops = [transforms.Resize((img_size, img_size))]
+    if use_basic_augment:
+        train_ops.extend(
+            [
+                transforms.RandomCrop(img_size, padding=4),
+                transforms.RandomHorizontalFlip(),
+            ]
+        )
     if use_random_augment:
         train_ops.append(transforms.RandAugment(num_ops=2, magnitude=9))
 
     MEAN = [0.4914, 0.4822, 0.4465]
     STD = [0.2023, 0.1994, 0.2010]
-    train_ops.extend(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=MEAN, std=STD
-            ),
-        ]
-    )
+    train_ops.append(transforms.ToTensor())
+    if normalize:
+        train_ops.append(transforms.Normalize(mean=MEAN, std=STD))
     if random_erasing_prob > 0:
         train_ops.append(transforms.RandomErasing(p=random_erasing_prob))
     train_transform = transforms.Compose(train_ops)
 
-    test_transform = transforms.Compose(
-        [
-            transforms.Resize((img_size, img_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=MEAN, std=STD
-            ),
-        ]
-    )
+    test_ops = [
+        transforms.Resize((img_size, img_size)),
+        transforms.ToTensor(),
+    ]
+    if normalize:
+        test_ops.append(transforms.Normalize(mean=MEAN, std=STD))
+    test_transform = transforms.Compose(test_ops)
 
     train_dataset = datasets.CIFAR10(
-        root="./data", train=True, download=True, transform=train_transform
+        root=DATA_DIR, train=True, download=True, transform=train_transform
     )
     val_loader = None
     num_workers = (
@@ -101,10 +99,33 @@ def get_dataloader_cifar(
     )
 
     test_dataset = datasets.CIFAR10(
-        root="./data", train=False, download=True, transform=test_transform
+        root=DATA_DIR, train=False, download=True, transform=test_transform
     )
     test_loader = DataLoader(
         test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers
     )
 
     return train_loader, test_loader, val_loader
+
+
+def get_cifar10_dataloaders(
+    use_basic_augment=True,
+    use_random_augment=True,
+    random_erasing_prob=0.25,
+    normalize=None,
+):
+    if normalize is None:
+        normalize = not USE_POISSON_ENCODING
+    train_loader, test_loader, _ = get_dataloader_cifar(
+        batch_size=BATCH_SIZE,
+        img_size=IMG_SIZE,
+        num_workers=NUM_WORKERS,
+        validation_split=None,
+        use_basic_augment=use_basic_augment,
+        use_random_augment=use_random_augment,
+        random_erasing_prob=random_erasing_prob,
+        normalize=normalize,
+    )
+    class_names = train_loader.dataset.classes
+    num_classes = len(class_names)
+    return train_loader, test_loader, num_classes, class_names

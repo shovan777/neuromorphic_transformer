@@ -1,20 +1,38 @@
 import torch
 import torch.nn as nn
-from spikingjelly.activation_based import neuron, functional, surrogate, layer
+from spikingjelly.activation_based import neuron, functional, surrogate, layer, encoding
 from config import TIME_STEP
 
 class Img2Spike(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, in_channels, channels, use_poisson=False):
         super().__init__()
+        self.use_poisson = use_poisson
+        if self.use_poisson:
+            self.poisson_encoder = encoding.PoissonEncoder()
+        c1 = max(1, channels // 4)
+        c2 = max(1, channels // 2)
         self.spike_conv = nn.Sequential(
-            layer.Conv2d(1, channels, kernel_size=3, padding=1, bias=False), 
+            layer.Conv2d(in_channels, c1, kernel_size=3, padding=1, bias=False),
+            layer.BatchNorm2d(c1),
+            neuron.IFNode(step_mode="m", surrogate_function=surrogate.ATan()),
+            layer.Conv2d(c1, c2, kernel_size=3, padding=1, bias=False),
+            layer.BatchNorm2d(c2),
+            neuron.IFNode(step_mode="m", surrogate_function=surrogate.ATan()),
+            layer.Conv2d(c2, channels, kernel_size=3, padding=1, bias=False),
             layer.BatchNorm2d(channels),
-            neuron.IFNode(surrogate_function=surrogate.ATan()),
+            neuron.IFNode(step_mode="m", surrogate_function=surrogate.ATan()),
         )
         functional.set_step_mode(self, step_mode="m")
         
     def forward(self, x):
-        x_seq = x.unsqueeze(0).repeat(TIME_STEP, 1, 1, 1, 1)  # T, B, 1, H, W
+        if self.use_poisson:
+            x = x.clamp(0.0, 1.0)
+            x_seq = torch.stack(
+                [self.poisson_encoder(x) for _ in range(TIME_STEP)],
+                dim=0,
+            )  # [T, B, C, H, W]
+        else:
+            x_seq = x.unsqueeze(0).repeat(TIME_STEP, 1, 1, 1, 1)  # T, B, C, H, W
         return self.spike_conv(x_seq) # [T, B, C, H, W]
 
 class SpikePatchEmbed(nn.Module):
@@ -41,21 +59,22 @@ class SSA(nn.Module):
 
         self.q_linear = nn.Linear(dim, dim)
         self.q_bn = nn.BatchNorm1d(dim)
-        self.q_lif = neuron.LIFNode(step_mode="m")
+        self.q_lif = neuron.LIFNode(step_mode="m", v_threshold=0.5)
 
         self.k_linear = nn.Linear(dim, dim)
         self.k_bn = nn.BatchNorm1d(dim)
-        self.k_lif = neuron.LIFNode(step_mode="m")
+        self.k_lif = neuron.LIFNode(step_mode="m", v_threshold=0.5)
 
         self.v_linear = nn.Linear(dim, dim)
         self.v_bn = nn.BatchNorm1d(dim)
-        self.v_lif = neuron.LIFNode(step_mode="m")
+        self.v_lif = neuron.LIFNode(step_mode="m", v_threshold=0.5)
 
-        self.attn_lif = neuron.LIFNode(step_mode="m")
+        self.attn_bn = nn.BatchNorm1d(dim)
+        self.attn_lif = neuron.LIFNode(step_mode="m", v_threshold=0.5)
 
         self.proj_linear = nn.Linear(dim, dim)
         self.proj_bn = nn.BatchNorm1d(dim)
-        self.proj_lif = neuron.LIFNode(step_mode="m")
+        self.proj_lif = neuron.LIFNode(step_mode="m", v_threshold=0.5)
 
     def forward(self, x):
         T,B,N,C = x.shape
@@ -83,6 +102,7 @@ class SSA(nn.Module):
 
         x = attn @ v
         x = x.transpose(2, 3).reshape(T, B, N, C).contiguous()
+        x = self.attn_bn(x.flatten(0, 1).transpose(-1, -2)).transpose(-1, -2).reshape(T, B, N, C)
         x = self.attn_lif(x)
         x = x.flatten(0, 1)
         x = self.proj_lif(self.proj_bn(self.proj_linear(x).transpose(-1, -2)).transpose(-1, -2).reshape(T, B, N, C))
@@ -99,15 +119,21 @@ class Mlp(nn.Module):
     ):
         super().__init__()
         self.fc1 = layer.Linear(in_features, hidden_features, bias=bias)
-        self.fc1_lif = neuron.IFNode(step_mode="m", surrogate_function=surrogate.ATan())
+        self.fc1_bn = nn.BatchNorm1d(hidden_features)
+        self.fc1_lif = neuron.LIFNode(step_mode="m", surrogate_function=surrogate.ATan(), v_threshold=0.5)
         self.fc2 = layer.Linear(hidden_features, out_features, bias=bias)
-        self.fc2_lif = neuron.IFNode(step_mode="m", surrogate_function=surrogate.ATan())
+        self.fc2_bn = nn.BatchNorm1d(out_features)
+        self.fc2_lif = neuron.LIFNode(step_mode="m", surrogate_function=surrogate.ATan(), v_threshold=0.5)
         functional.set_step_mode(self, "m")
         
     def forward(self, x):
-        x = self.fc1(x)
+        # x: [T, B, N, C]
+        T, B, N, C = x.shape
+        x = self.fc1(x)  # [T, B, N, hidden]
+        x = self.fc1_bn(x.flatten(0, 1).transpose(-1, -2)).transpose(-1, -2).reshape(T, B, N, -1)
         x = self.fc1_lif(x)
-        x = self.fc2(x)
+        x = self.fc2(x)  # [T, B, N, out]
+        x = self.fc2_bn(x.flatten(0, 1).transpose(-1, -2)).transpose(-1, -2).reshape(T, B, N, -1)
         x = self.fc2_lif(x)
         return x
 
@@ -126,12 +152,30 @@ class Block(nn.Module):
         return x
 
 class SpikFormer(nn.Module):
-    def __init__(self, num_classes=10, num_channels=1, dim=64, depth=2, num_heads=4, mlp_ratio=2., use_cupy=False):
+    def __init__(
+        self,
+        num_classes=10,
+        in_channels=1,
+        num_channels=1,
+        use_poisson=False,
+        img_size=28,
+        patch_size=4,
+        dim=64,
+        depth=2,
+        num_heads=4,
+        mlp_ratio=2.,
+        use_cupy=False,
+    ):
         super().__init__()
         self.dim = dim
-        self.img2spike = Img2Spike(channels=num_channels)
-        self.patch_embed = SpikePatchEmbed(in_channels=num_channels, embed_dim=dim, patch_size=4)
-        self.pos_enc = nn.Parameter(torch.zeros(1, (28//4)*(28//4), dim))
+        self.img2spike = Img2Spike(
+            in_channels=in_channels,
+            channels=num_channels,
+            use_poisson=use_poisson,
+        )
+        self.patch_embed = SpikePatchEmbed(in_channels=num_channels, embed_dim=dim, patch_size=patch_size)
+        num_patches = (img_size // patch_size) * (img_size // patch_size)
+        self.pos_enc = nn.Parameter(torch.zeros(1, num_patches, dim))
         self.blocks = nn.ModuleList([
             Block(dim=dim, num_heads=num_heads, mlp_ratio=mlp_ratio)
             for _ in range(depth)

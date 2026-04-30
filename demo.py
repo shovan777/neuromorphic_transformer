@@ -15,7 +15,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import gradio as gr
-from spikingjelly.activation_based import functional
+from spikingjelly.activation_based import functional, neuron
 from torchvision import datasets, transforms
 
 # ---------------------------------------------------------------------------
@@ -74,6 +74,7 @@ test_dataset = datasets.CIFAR10(
 # Hook to capture spike feature maps from Img2Spike output
 # ---------------------------------------------------------------------------
 _spike_enc_cache = {}
+_spike_rate_cache = {}
 
 def _register_hooks(m):
     handles = []
@@ -81,6 +82,27 @@ def _register_hooks(m):
     handles.append(m.img2spike.register_forward_hook(
         lambda mod, inp, out: _spike_enc_cache.update({"img2spike": out.detach().cpu()})
     ))
+
+    # Capture spike rates per transformer block from all spiking nodes in that block.
+    _spike_rate_cache.clear()
+    _spike_rate_cache["block_fired"] = [0.0 for _ in range(len(m.blocks))]
+    _spike_rate_cache["block_total"] = [0 for _ in range(len(m.blocks))]
+
+    def _make_block_hook(block_idx):
+        def hook(_, __, output):
+            spikes = output[0] if isinstance(output, tuple) else output
+            if not torch.is_tensor(spikes):
+                return
+            spikes = spikes.detach()
+            _spike_rate_cache["block_fired"][block_idx] += spikes.sum().item()
+            _spike_rate_cache["block_total"][block_idx] += spikes.numel()
+        return hook
+
+    for block_idx, block in enumerate(m.blocks):
+        for module in block.modules():
+            if isinstance(module, neuron.BaseNode):
+                handles.append(module.register_forward_hook(_make_block_hook(block_idx)))
+
     return handles
 
 
@@ -168,7 +190,7 @@ def _plot_attention_overlay(img_np, model):
     return out
 
 
-def _plot_firing_heatmap(model):
+def _plot_firing_heatmap(model, block_rates, overall_rate):
     """
     Plot attention activity intensity with explicit axes:
       - y-axis: transformer blocks (0..NUM_LAYERS-1)
@@ -183,9 +205,12 @@ def _plot_firing_heatmap(model):
         all_rates.append(rate)
 
     arr = np.stack(all_rates, axis=0)  # [L, N]
-    fig, ax = plt.subplots(figsize=(11, 3.8), dpi=120)
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.2), dpi=120, gridspec_kw={"width_ratios": [2.2, 1.0]})
+
+    # Left: attention activity heatmap (patch x block)
+    ax = axes[0]
     im = ax.imshow(arr, cmap="viridis", aspect="auto", interpolation="nearest")
-    ax.set_title("Mean Attention Activity per Patch per Block")
+    ax.set_title("Attention Activity per Patch per Block")
     ax.set_xlabel("Patch index")
     ax.set_ylabel("Block")
     ax.set_yticks(list(range(arr.shape[0])))
@@ -194,6 +219,21 @@ def _plot_firing_heatmap(model):
     ax.set_xticks(xticks)
     ax.set_xticklabels([str(x) for x in xticks])
     fig.colorbar(im, ax=ax, label="magnitude", fraction=0.03, pad=0.02)
+
+    # Right: true spike firing rates per block + overall average
+    ax2 = axes[1]
+    y = np.arange(len(block_rates))
+    bars = ax2.barh(y, np.array(block_rates) * 100.0, color="#4caf50")
+    ax2.set_yticks(y)
+    ax2.set_yticklabels([f"Block {i}" for i in y])
+    ax2.set_xlabel("Firing rate (%)")
+    ax2.set_title("Spike Firing Rate")
+    ax2.axvline(overall_rate * 100.0, color="red", linestyle="--", linewidth=1.5, label=f"Overall {overall_rate*100:.2f}%")
+    ax2.legend(loc="lower right", fontsize=8)
+    for bar in bars:
+        w = bar.get_width()
+        ax2.text(w + 0.05, bar.get_y() + bar.get_height() / 2, f"{w:.2f}%", va="center", fontsize=8)
+
     fig.tight_layout()
     out = _fig_to_numpy(fig)
     plt.close(fig)
@@ -227,6 +267,18 @@ def run_inference(_):
     for h in hooks:
         h.remove()
 
+    block_fired = _spike_rate_cache.get("block_fired", [])
+    block_total = _spike_rate_cache.get("block_total", [])
+    block_rates = [
+        (f / t) if t > 0 else 0.0
+        for f, t in zip(block_fired, block_total)
+    ]
+    overall_rate = (
+        sum(block_fired) / sum(block_total)
+        if sum(block_total) > 0
+        else 0.0
+    )
+
     probs = torch.softmax(logits[0], dim=0).cpu().numpy()
     pred_idx = int(probs.argmax())
     pred_name = CIFAR10_CLASSES[pred_idx]
@@ -237,6 +289,8 @@ def run_inference(_):
         f"**Prediction:** {pred_name} ({conf:.1f}%)\n"
         f"**Ground truth:** {true_name}  "
         + ("✅" if pred_idx == true_label else "❌")
+        + "\n"
+        + f"**Overall block firing rate:** {overall_rate*100:.3f}%"
     )
 
     # Top-3 bar chart
@@ -266,7 +320,7 @@ def run_inference(_):
     attn_img = _plot_attention_overlay(img_np, model)
 
     # Firing heatmap
-    fire_img = _plot_firing_heatmap(model)
+    fire_img = _plot_firing_heatmap(model, block_rates=block_rates, overall_rate=overall_rate)
 
     return img_np, label_text, pred_img, enc_img, attn_img, fire_img
 
@@ -293,7 +347,7 @@ with gr.Blocks(title="SpikFormer CIFAR-10 Demo") as demo:
         attn_out  = gr.Image(label="Attention Overlay per Block")
 
     with gr.Row():
-        fire_out  = gr.Image(label="Attention Firing Heatmap (patch × block)")
+        fire_out  = gr.Image(label="Attention Activity + Spike Firing Rates")
 
     btn.click(
         fn=run_inference,

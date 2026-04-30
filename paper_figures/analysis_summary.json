@@ -1,0 +1,130 @@
+{
+  "checkpoint": "models/checkpoint_20260427-01h/best_spikformer_dim128_heads4_mlp256_layers4_epoch198_acc0.8551.pth",
+  "baseline_accuracy": 0.8551,
+  "ece": 0.18582903655916452,
+  "overall_firing_rate": 0.07269310674667358,
+  "block_firing_rates": [
+    0.0786043170928955,
+    0.07547755546569825,
+    0.07828706474304199,
+    0.058403489685058596
+  ],
+  "best_class": {
+    "name": "automobile",
+    "acc": 0.953
+  },
+  "worst_class": {
+    "name": "cat",
+    "acc": 0.71
+  },
+  "top_confusions": [
+    {
+      "true": "dog",
+      "pred": "cat",
+      "count": 113
+    },
+    {
+      "true": "cat",
+      "pred": "dog",
+      "count": 93
+    },
+    {
+      "true": "deer",
+      "pred": "bird",
+      "count": 63
+    },
+    {
+      "true": "cat",
+      "pred": "bird",
+      "count": 51
+    },
+    {
+      "true": "cat",
+      "pred": "frog",
+      "count": 51
+    },
+    {
+      "true": "truck",
+      "pred": "automobile",
+      "count": 46
+    },
+    {
+      "true": "bird",
+      "pred": "airplane",
+      "count": 43
+    },
+    {
+      "true": "bird",
+      "pred": "frog",
+      "count": 43
+    },
+    {
+      "true": "bird",
+      "pred": "deer",
+      "count": 41
+    },
+    {
+      "true": "deer",
+      "pred": "frog",
+      "count": 40
+    }
+  ],
+  "timestep_ablation": [
+    {
+      "time_step": 1,
+      "accuracy": 0.0986
+    },
+    {
+      "time_step": 2,
+      "accuracy": 0.817
+    },
+    {
+      "time_step": 3,
+      "accuracy": 0.8467
+    },
+    {
+      "time_step": 4,
+      "accuracy": 0.8551
+    },
+    {
+      "time_step": 5,
+      "accuracy": 0.8527
+    },
+    {
+      "time_step": 6,
+      "accuracy": 0.8483
+    }
+  ],
+  "block_drop_ablation": [
+    {
+      "block": 0,
+      "accuracy": 0.7375,
+      "drop": 0.11759999999999993
+    },
+    {
+      "block": 1,
+      "accuracy": 0.8008,
+      "drop": 0.054300000000000015
+    },
+    {
+      "block": 2,
+      "accuracy": 0.7916,
+      "drop": 0.0635
+    },
+    {
+      "block": 3,
+      "accuracy": 0.8197,
+      "drop": 0.03539999999999999
+    }
+  ],
+  "figures": [
+    "paper_figures/confusion_counts.png",
+    "paper_figures/confusion_normalized.png",
+    "paper_figures/per_class_accuracy.png",
+    "paper_figures/reliability_diagram.png",
+    "paper_figures/confidence_histogram.png",
+    "paper_figures/timestep_ablation.png",
+    "paper_figures/block_drop_ablation.png",
+    "paper_figures/block_firing_rates.png"
+  ]
+}

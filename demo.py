@@ -16,7 +16,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import gradio as gr
 from spikingjelly.activation_based import functional
-from spikingjelly import visualizing
 from torchvision import datasets, transforms
 
 # ---------------------------------------------------------------------------
@@ -97,23 +96,36 @@ def _fig_to_numpy(fig):
     return arr[:, :, :3]  # drop alpha
 
 
-def _plot_spike_encoding(spike_tensor):
+def _plot_spike_encoding(spike_tensor, image_np, class_name, label):
     """
-    spike_tensor: [T, B, C, H, W]  — take B=0, average over C → [T, H, W]
-    Use spikingjelly plot_2d_feature_map to show T frames side-by-side.
+    Match visualize_cifar10_spikes.py format:
+      - first panel: original image
+      - then one panel per timestep for the most active channel
     """
-    T, _, C, H, W = spike_tensor.shape
-    # Average over channels to get [T, H, W], then layout as [1, T] grid
-    frames = spike_tensor[:, 0].mean(dim=1).numpy()  # [T, H, W]
-    # Stack into a [T*H, W] image for plot_2d_feature_map (nrows=1, ncols=T)
-    grid = np.concatenate([frames[t] for t in range(T)], axis=1)  # [H, T*W]
-    fig, ax = plt.subplots(1, 1, figsize=(10, 2.5), dpi=120)
-    im = ax.imshow(grid, cmap="hot", vmin=0, vmax=1)
-    ax.set_title(f"Spike Encoding  (T={T} timesteps, avg over {C} channels)", fontsize=10)
-    ax.set_xticks([W * t + W // 2 for t in range(T)])
-    ax.set_xticklabels([f"t={t}" for t in range(T)])
-    ax.set_yticks([])
-    plt.colorbar(im, ax=ax, fraction=0.02)
+    # spike_tensor: [T, B, C, H, W]
+    channel_totals = spike_tensor[:, 0].sum(dim=(0, 2, 3))
+    active_channel = int(channel_totals.argmax().item())
+    spike_maps = spike_tensor[:, 0, active_channel].numpy()  # [T, H, W]
+
+    num_timesteps = spike_maps.shape[0]
+    cols = 3
+    rows = (num_timesteps + 2) // cols  # +1 for original image
+    fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 4 * rows), dpi=120)
+    axes = np.atleast_1d(axes).flatten()
+
+    axes[0].imshow(image_np)
+    axes[0].set_title(f"Original CIFAR10 (label={label}: {class_name})")
+    axes[0].axis("off")
+
+    for t in range(num_timesteps):
+        ax = axes[t + 1]
+        ax.imshow(spike_maps[t], cmap="gray")
+        ax.set_title(f"Spike map S[{t}] (ch={active_channel})")
+        ax.axis("off")
+
+    for k in range(num_timesteps + 1, len(axes)):
+        axes[k].axis("off")
+
     plt.tight_layout()
     out = _fig_to_numpy(fig)
     plt.close(fig)
@@ -158,29 +170,31 @@ def _plot_attention_overlay(img_np, model):
 
 def _plot_firing_heatmap(model):
     """
-    For each transformer block, collect mean firing rate per neuron position (N)
-    from q/k/v LIF outputs and plot as a heatmap using spikingjelly.
-    Uses the stored attn_weights as a proxy signal.
+    Plot attention activity intensity with explicit axes:
+      - y-axis: transformer blocks (0..NUM_LAYERS-1)
+      - x-axis: patch indices (0..N-1)
     """
     all_rates = []
     for block in model.blocks:
         attn = block.attn.attn_weights  # [T, B, heads, N, N]
-        # Mean activation per patch (sum over key dim, avg over T, heads, B)
+        # Mean activity per patch (sum over key dim, avg over T and heads)
         rate = attn[:, 0].mean(dim=0).sum(dim=-1)  # [heads, N]
-        rate = rate.mean(dim=0).cpu().numpy()       # [N]
+        rate = rate.mean(dim=0).cpu().numpy()  # [N]
         all_rates.append(rate)
 
     arr = np.stack(all_rates, axis=0)  # [L, N]
-    fig = visualizing.plot_2d_heatmap(
-        array=arr,
-        title="Mean Attention Activity per Patch per Block",
-        xlabel="Patch index",
-        ylabel="Block",
-        int_x_ticks=False,
-        int_y_ticks=True,
-        figsize=(10, 3),
-        dpi=120,
-    )
+    fig, ax = plt.subplots(figsize=(11, 3.8), dpi=120)
+    im = ax.imshow(arr, cmap="viridis", aspect="auto", interpolation="nearest")
+    ax.set_title("Mean Attention Activity per Patch per Block")
+    ax.set_xlabel("Patch index")
+    ax.set_ylabel("Block")
+    ax.set_yticks(list(range(arr.shape[0])))
+    ax.set_yticklabels([f"Block {i}" for i in range(arr.shape[0])])
+    xticks = np.linspace(0, arr.shape[1] - 1, num=9, dtype=int)
+    ax.set_xticks(xticks)
+    ax.set_xticklabels([str(x) for x in xticks])
+    fig.colorbar(im, ax=ax, label="magnitude", fraction=0.03, pad=0.02)
+    fig.tight_layout()
     out = _fig_to_numpy(fig)
     plt.close(fig)
     return out
@@ -241,7 +255,12 @@ def run_inference(_):
     plt.close(fig_pred)
 
     # Spike encoding
-    enc_img = _plot_spike_encoding(_spike_enc_cache["img2spike"])
+    enc_img = _plot_spike_encoding(
+        _spike_enc_cache["img2spike"],
+        img_np,
+        true_name,
+        true_label,
+    )
 
     # Attention overlay (no_grad already done, attn_weights stored in model)
     attn_img = _plot_attention_overlay(img_np, model)
